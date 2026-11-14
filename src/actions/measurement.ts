@@ -1,106 +1,88 @@
-import { action, DidReceiveSettingsEvent, KeyDownEvent, SingletonAction, WillAppearEvent } from "@elgato/streamdeck";
+import { action, DidReceiveSettingsEvent, KeyAction, SingletonAction, WillAppearEvent, WillDisappearEvent } from "@elgato/streamdeck";
 import streamDeck from "@elgato/streamdeck";
-import { Socket } from "net";
+import { PowerMeter, type Reading } from "../power-meter.js";
 
-interface Response {
-  voltage: number;
-  current: number;
-  power: number;
-  timestamp: number;
-};
-
-function parseResponse(data: Buffer<ArrayBufferLike>): Response {
-  if (data.byteLength !== 30) {
-    throw Error(`Invalid response length: ${data.byteLength}`);
-  }
-  if (data.readUIntBE(0, 5) !== 0xAA001A1800) {
-    throw Error("Invalid response header");
-  }
-  return {
-    voltage: data.readUIntLE(5, 6) / (1 << 24),
-    current: data.readUIntLE(11, 6) / (1 << 30),
-    power: data.readUIntLE(17, 6) / (1 << 24),
-    timestamp: data.readUIntLE(23, 6),
-  };
-}
-
-@action({ UUID: "com.nkyoku.wfwattch2-client.power" })
+@action({ UUID: "com.nkyoku.wfwattch2-client.measurement" })
 export class Measurement extends SingletonAction<MeasurementSettings> {
-  constructor() {
-    super();
-  }
+  /** Visible keys of this action, mapped to the function that releases their subscription. */
+  private readonly subscriptions = new Map<string, () => void>();
 
+  /**
+   * Called when a key becomes visible. The key subscribes to the shared
+   * {@link PowerMeter} for its host, which polls the meter on a schedule and
+   * hands every key the measurement; the key never sends a request of its own.
+   */
   override async onWillAppear(ev: WillAppearEvent<MeasurementSettings>): Promise<void> {
     if (!ev.action.isKey()) {
       return;
     }
-    await ev.action.setTitle(`${ev.payload.settings.host ?? "none"}`);
+    this.subscribe(ev.action, ev.payload.settings);
+  }
+
+  override async onWillDisappear(ev: WillDisappearEvent<MeasurementSettings>): Promise<void> {
+    this.unsubscribe(ev.action.id);
   }
 
   override async onDidReceiveSettings(ev: DidReceiveSettingsEvent<MeasurementSettings>): Promise<void> {
     if (!ev.action.isKey()) {
       return;
     }
-    await ev.action.setTitle(`${ev.payload.settings.host ?? "none"}`);
+    // The host may have changed: subscribe to the meter for the new settings.
+    this.subscribe(ev.action, ev.payload.settings);
   }
 
-  override async onKeyDown(ev: KeyDownEvent<MeasurementSettings>): Promise<void> {
-    const { settings } = ev.payload;
+  /** Registers `key` with the meter for its host, replacing any previous subscription of that key. */
+  private subscribe(key: KeyAction<MeasurementSettings>, settings: MeasurementSettings): void {
+    const id = key.id;
+    this.unsubscribe(id);
 
-    if (!settings.host) {
+    const host = settings.host?.trim();
+    if (!host) {
+      void this.setTitle(key, "?");
       return;
     }
 
-    const client = new Socket();
-    client.connect(60121, settings.host, async () => {
-      // Send measurement request
-      const data = new Uint8Array([0xAA, 0x00, 0x02, 0x18, 0x00, 0x65]);
-      client.write(data);
+    // Keys using the same host share one instance, one poll and one request per measurement.
+    const unsubscribe = PowerMeter.for(host).subscribe(id, (reading) => {
+      void this.update(key, settings, reading);
     });
 
-    client.on("data", async data => {
-      try {
-        const response = parseResponse(data);
-        let value = response.power;
-        let unit = "W";
-        switch (settings.type) {
-          case "voltage":
-            value = response.voltage;
-            unit = "V";
-            break;
-          case "current":
-            value = response.current;
-            unit = "A";
-            break;
-        }
-        await ev.action.setTitle(`${value?.toFixed(0)}\n${unit}`);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        streamDeck.logger.error(`Failed to parse response: ${message}`);
-      }
-      client.end();
-    });
-
-    client.on("error", err => {
-      streamDeck.logger.error(`Socket error: ${err.message}`);
-    });
+    this.subscriptions.set(id, unsubscribe);
   }
 
-  /*async onTimeout() {
-  
-  this.actions.forEach(async action => {
-  try {
-  const settings = await action.getSettings();
-  
-  
-  } catch (err) {
-  const message = err instanceof Error ? err.message : String(err);
-  streamDeck.logger.error(`could not start plugin: ${ message }`);
+  private unsubscribe(id: string): void {
+    const previous = this.subscriptions.get(id);
+    if (previous) {
+      this.subscriptions.delete(id);
+      previous();
+    }
   }
-  });
-  
-  setTimeout(async () => { await this.onTimeout(); }, 1000);
-  }*/
+
+  /** Writes the value the meter reported to the title of `key`. */
+  private async update(key: KeyAction<MeasurementSettings>, settings: MeasurementSettings, reading: Reading): Promise<void> {
+    let value = reading?.power;
+    let unit = "W";
+    switch (settings.type) {
+      case "voltage":
+        value = reading?.voltage;
+        unit = "V";
+        break;
+      case "current":
+        value = reading?.current;
+        unit = "A";
+        break;
+    }
+    await this.setTitle(key, `${value?.toFixed(0) ?? "?"}\n${unit}`);
+  }
+
+  private async setTitle(key: KeyAction<MeasurementSettings>, title: string): Promise<void> {
+    try {
+      await key.setTitle(title);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      streamDeck.logger.error(`Failed to set title: ${message}`);
+    }
+  }
 }
 
 type MeasurementSettings = {
