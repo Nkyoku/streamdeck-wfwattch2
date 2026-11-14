@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+
+<head lang="en">
+	<title>Measurement Settings</title>
+	<meta charset="utf-8" />
+	<script src="https://sdpi-components.dev/releases/v4/sdpi-components.js"></script>
+</head>
+
+<body>
+	<!-- Learn more about property inspector components at https://sdpi-components.dev/docs/components -->
+	<sdpi-item label="Host">
+		<sdpi-textfield setting="host" placeholder="IP address or hostname" required></sdpi-textfield>
+	</sdpi-item>
+	<sdpi-item label="Type">
+		<sdpi-select setting="type" default="power">
+			<option value="voltage">Voltage</option>
+			<option value="current">Current</option>
+			<option value="power">Power</option>
+		</sdpi-select>
+	</sdpi-item>
+</body>
+
+</html>
